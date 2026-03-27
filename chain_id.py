@@ -10,6 +10,9 @@ import argparse
 import sys
 from pathlib import Path
 
+from openpyxl import Workbook
+from openpyxl.styles import Font, Alignment, PatternFill, Border, Side
+
 from Bio.PDB import PDBParser, MMCIFParser
 from Bio.PDB.Polypeptide import PPBuilder, is_aa
 from Bio.Data.IUPACData import protein_letters_3to1
@@ -236,6 +239,113 @@ def print_sequence(chain_data, show_chains):
     print()
 
 
+def export_excel(chain_data, scheme, output_path):
+    """Export results to an Excel file with multiple sheets."""
+    wb = Workbook()
+
+    header_font = Font(bold=True, color="FFFFFF", size=11)
+    header_fill = PatternFill(start_color="4472C4", end_color="4472C4", fill_type="solid")
+    ab_fill = PatternFill(start_color="E2EFDA", end_color="E2EFDA", fill_type="solid")
+    ag_fill = PatternFill(start_color="FCE4D6", end_color="FCE4D6", fill_type="solid")
+    thin_border = Border(
+        left=Side(style='thin'), right=Side(style='thin'),
+        top=Side(style='thin'), bottom=Side(style='thin'),
+    )
+
+    def style_header(ws, row=1):
+        for cell in ws[row]:
+            cell.font = header_font
+            cell.fill = header_fill
+            cell.alignment = Alignment(horizontal='center')
+            cell.border = thin_border
+
+    # --- Sheet 1: Chain Summary ---
+    ws1 = wb.active
+    ws1.title = "Chain Summary"
+    ws1.append(["Chain", "Type", "Chain Type Detail", "Length", f"Scheme: {scheme.upper()}"])
+    style_header(ws1)
+
+    for cid, info in chain_data.items():
+        ab = info['ab_chain']
+        detail = ""
+        if info['is_antibody']:
+            detail = ab.chain_type  # H, K, or L
+        row = [cid, info['type_label'], detail, info['length']]
+        ws1.append(row)
+        r = ws1.max_row
+        fill = ab_fill if info['is_antibody'] else ag_fill
+        for cell in ws1[r]:
+            cell.fill = fill
+            cell.border = thin_border
+
+    for col in ws1.columns:
+        ws1.column_dimensions[col[0].column_letter].width = 22
+
+    # --- Sheet 2: CDR Regions ---
+    ws2 = wb.create_sheet("CDR Regions")
+    ws2.append(["Chain", "Chain Type", "CDR-1", "CDR-2", "CDR-3"])
+    style_header(ws2)
+
+    for cid, info in chain_data.items():
+        if not info['is_antibody']:
+            continue
+        ab = info['ab_chain']
+        ws2.append([cid, get_chain_type_label(ab),
+                    str(ab.cdr1_seq), str(ab.cdr2_seq), str(ab.cdr3_seq)])
+        r = ws2.max_row
+        for cell in ws2[r]:
+            cell.fill = ab_fill
+            cell.border = thin_border
+
+    for col in ws2.columns:
+        ws2.column_dimensions[col[0].column_letter].width = 22
+
+    # --- Sheet 3: CDR Residue Details ---
+    ws3 = wb.create_sheet("CDR Details")
+    ws3.append(["Chain", "CDR Region", "PDB Residue #", f"{scheme.upper()} Position", "Amino Acid"])
+    style_header(ws3)
+
+    for cid, info in chain_data.items():
+        if not info['is_antibody']:
+            continue
+        ab = info['ab_chain']
+        short_type = 'H' if ab.chain_type == 'H' else 'L'
+        for region_name, res_list in info['cdr_mapping'].items():
+            cdr_num = region_name.replace('CDR', '')
+            display_name = f"CDR-{short_type}{cdr_num}"
+            for pdb_label, scheme_pos, aa in res_list:
+                ws3.append([cid, display_name, pdb_label, scheme_pos, aa])
+                r = ws3.max_row
+                for cell in ws3[r]:
+                    cell.border = thin_border
+
+    for col in ws3.columns:
+        ws3.column_dimensions[col[0].column_letter].width = 18
+
+    # --- Sheet 4: Sequences ---
+    ws4 = wb.create_sheet("Sequences")
+    ws4.append(["Chain", "Type", "Length", "Sequence"])
+    style_header(ws4)
+
+    for cid, info in chain_data.items():
+        ws4.append([cid, info['type_label'], info['length'], info['sequence']])
+        r = ws4.max_row
+        fill = ab_fill if info['is_antibody'] else ag_fill
+        for cell in ws4[r]:
+            cell.fill = fill
+            cell.border = thin_border
+        # Wrap the sequence column
+        ws4.cell(row=r, column=4).alignment = Alignment(wrap_text=True)
+
+    ws4.column_dimensions['A'].width = 8
+    ws4.column_dimensions['B'].width = 25
+    ws4.column_dimensions['C'].width = 10
+    ws4.column_dimensions['D'].width = 80
+
+    wb.save(output_path)
+    print(f"Excel file saved: {output_path}")
+
+
 def main():
     parser = argparse.ArgumentParser(
         description='Identify antibody/antigen chains from PDB/CIF files',
@@ -255,6 +365,8 @@ Examples:
                         help='Show full sequence for specified chains (use "all" for all)')
     parser.add_argument('--cdr-details', action='store_true',
                         help='Show residue-level CDR details')
+    parser.add_argument('--excel', metavar='PATH', nargs='?', const='auto',
+                        help='Export results to Excel file (default: output/<pdb_name>.xlsx)')
 
     args = parser.parse_args()
 
@@ -305,6 +417,17 @@ Examples:
 
     if args.show_seq:
         print_sequence(chain_data, args.show_seq)
+
+    if args.excel:
+        if args.excel == 'auto':
+            stem = Path(args.input).stem
+            output_dir = Path(__file__).parent / 'output'
+            output_dir.mkdir(exist_ok=True)
+            excel_path = output_dir / f"{stem}.xlsx"
+        else:
+            excel_path = Path(args.excel)
+            excel_path.parent.mkdir(parents=True, exist_ok=True)
+        export_excel(chain_data, args.scheme, str(excel_path))
 
 
 if __name__ == '__main__':
